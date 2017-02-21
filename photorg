@@ -1,0 +1,222 @@
+#!/opt/local/bin/python2.7
+
+import os.path
+import magic
+import exifread
+import datetime
+import mimetypes
+import os
+import sys
+import getopt
+import fileinput
+import subprocess
+
+mimetypes.init()
+mime = magic.Magic(mime=True)
+
+
+def isImage(fileType):
+    if fileType[0:5] == "image":
+        return True
+    return False
+
+
+def isVideo(fileType):
+    if fileType[0:5] == "video":
+        return True
+    return False
+
+
+def getModificationDateTime(fileName):
+    timeStamp = os.path.getmtime(fileName)
+    dateTime = datetime.datetime.fromtimestamp(timeStamp)
+    return dateTime.strftime("%Y:%m:%d %H:%M:%S")
+
+
+def getDirPrefix():
+    time = datetime.datetime.now()
+    return "Backup_{0}".format(time.strftime("%Y%m%d%H%M%S"))
+
+
+def getExifDateTime(fileName): 
+    with open(fileName, 'rb') as fp:
+        tags = exifread.process_file(fp)
+        for tag in tags.keys():
+            #print "Key: %s, value %s" % (tag, tags[tag])
+            lowerTag = tag.lower()
+            if "datetime" in lowerTag:
+                if str(tags[tag]) != "0000:00:00 00:00:00":
+                    return str(tags[tag])
+    return getModificationDateTime(fileName)
+
+
+def genOutFolder(fileDateTime):
+    path, path2 = fileDateTime.split(" ", 1);
+    path = path.replace(":","/")
+    return path
+
+
+def uniqueFileName(folderpath, filename, extension):
+    filename = filename.lower()
+    filename_ext = "{0}{1}".format(filename, extension)
+    filepath = os.path.join(folderpath, filename_ext)
+    if os.path.isfile(filepath) or os.path.isdir(filepath):
+        i = 0
+        while os.path.isfile(filepath) or os.path.isdir(filepath):
+            i += 1
+            filename_ext = "{0}-{1}{2}".format(filename, i, extension)
+            filepath = os.path.join(folderpath, filename_ext)
+    return filepath
+
+
+def getExtension(fileType):
+    ext = mimetypes.guess_extension(fileType)
+    if ext:
+        if ext == ".jpe":
+            ext = ".jpg"
+    return ext
+
+
+def getOutFileName(fileDateTime):
+    path = fileDateTime.replace(" ", "_")
+    path = path.replace(":", "_")
+    return path
+
+
+def getOutFileName2(fileDateTime, fileSize):
+    path = fileDateTime.replace(" ", "_")
+    path = path.replace(":", "_")
+    return "{0}_{1}".format(path, fileSize)
+
+
+def genOutFileName(fileType, fileDateTime):
+    path = getOutFileName(fileDateTime)
+    ext = getExtension(fileType)
+    if ext:
+        return path + ext
+    return path
+
+
+def genOutFileName2(fileType, fileDateTime, fileSize):
+    path = getOutFileName2(fileDateTime, fileSize)
+    ext = getExtension(fileType)
+    if ext:
+        #return path + "_{0}".format(size) + ext
+        #return "{0}_{1}{2}".format(path, fileSize, ext)
+        return path + ext
+    return path
+
+
+def processFile(fileName, outDirectory):
+    if os.path.isdir(fileName):
+        sys.stdout.write("Skipping Directory")
+        return False
+
+    if not os.path.isfile(fileName):
+        sys.stdout.write("File Not Found")
+        return False
+
+    fileType = mime.from_file(fileName)
+    sys.stdout.write('"{0}", '.format(fileType))
+
+    if not(isImage(fileType) or isVideo(fileType)):
+        sys.stdout.write("Skipping not Image/Video")
+        return False
+
+    fileSize = os.path.getsize(fileName)
+    sys.stdout.write('{0}, '.format(fileSize))
+
+    fileDateTime = getExifDateTime(fileName)
+    outFolder = genOutFolder(fileDateTime)
+    outFileName = genOutFileName(fileType, fileDateTime)
+    outPath = os.path.join(outFolder, outFileName)
+    fullOutPath = os.path.join(outDirectory, outPath)
+
+    isDuplicate = False
+    if os.path.isfile(fullOutPath) or os.path.isdir(fullOutPath):
+        if fileSize == os.path.getsize(fullOutPath):
+            duplidir = os.path.join(outDirectory, "duplicates")
+            duplidir = os.path.join(duplidir, outFolder)
+            fullOutPath = uniqueFileName(duplidir, getOutFileName(fileDateTime), getExtension(fileType))
+            isDuplicate = True
+        else:
+            outFileName = genOutFileName2(fileType, fileDateTime, fileSize)
+            outPath = os.path.join(outFolder, outFileName)
+            fullOutPath = os.path.join(outDirectory, outPath)
+            if os.path.isfile(fullOutPath) or os.path.isdir(fullOutPath):
+                duplidir = os.path.join(outDirectory, "duplicates")
+                duplidir = os.path.join(duplidir, outFolder)
+                fullOutPath = uniqueFileName(duplidir, getOutFileName2(fileDateTime, fileSize), getExtension(fileType))
+                isDuplicate = True
+
+    if isDuplicate:
+        sys.stdout.write('Skipping Duplicate')
+        return False
+
+    sys.stdout.write('"{0}", '.format(fullOutPath))
+
+    command = '/usr/bin/ditto "{0}" "{1}"'.format(fileName, fullOutPath)
+
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, shell=True)
+    (out, err) = proc.communicate()
+
+    if err:
+        err.replace("\n", "/")
+        sys.stdout.write('"{0}", '.format(out))
+    if out:
+        out.replace("\n", "/")
+        sys.stdout.write('"{0}", '.format(out))
+
+    return True
+
+
+def organize(outDirectory, startLine):
+    lineCount = 0
+    processed = 0
+
+    for line in sys.stdin:
+        if lineCount >= startLine:
+            fileName = line.strip()
+            sys.stdout.write('{0}, "{1}",'.format(lineCount, fileName))
+            if (processFile(fileName, outDirectory)):
+                processed += 1
+            sys.stdout.write("\n")
+        lineCount += 1
+        
+    sys.stdout.write("Processed {0} items out of {1}.\n".format(processed, lineCount))
+    sys.stderr.write("Completed.\n")
+
+
+def usage(argv):
+    sys.stderr.write('{0} -o <out-directory>\n'.format(argv[0]))
+    sys.stderr.write('Reads list of files from standard input, example from find\n')
+    
+    
+def main(argv):
+    outDirectory = ''
+    startLine = 0
+    try:
+        opts, args = getopt.getopt(argv[1:],"ho:l:",["out-dir=","start-line"])
+    except getopt.GetoptError:
+        usage(argv)
+        sys.exit(2)
+    for opt, arg in opts:
+        if opt == '-h':
+            usage(argv)
+            sys.exit()
+        elif opt in ("-o", "--out-dir"):
+            outDirectory = arg
+        elif opt in ("-l", "--start-line"):
+            startLine = int(arg)
+
+    if outDirectory == '':
+        usage(argv)
+        sys.exit(2)
+
+    sys.stderr.write("Output Directory {0}\n".format(outDirectory))
+
+    organize(outDirectory, startLine)
+
+
+if __name__ == "__main__":
+    main(sys.argv)
